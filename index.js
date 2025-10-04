@@ -115,7 +115,7 @@ client.on("interactionCreate", async interaction => {
                 if (!playerMentions) {
                     return interaction.editReply("Lütfen geçerli oyuncuları etiketle.");
                 }
-                const newSession = { totalItemValue: 0, players: {}, tax: tax }; // players'ı obje olarak başlatalım
+                const newSession = { totalItemValue: 0, players: {}, tax: tax };
                 const playerList = [];
                 const playerPromises = playerMentions.map(mention => {
                     const id = mention.replace(/<@!?/, '').replace('>', '');
@@ -132,26 +132,29 @@ client.on("interactionCreate", async interaction => {
                 break;
 
             case "silver-ekle":
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await interaction.deferReply(); // Herkesin görmesi için ephemeral kaldırıldı.
                 const player = options.getUser("oyuncu");
                 const amountStringSilver = options.getString("miktar");
                 const amountSilver = parseSilver(amountStringSilver);
-                if (amountSilver === null) { return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan."); }
-                if (!session.players[player.id]) { return interaction.editReply(`Hata: ${player.username} mevcut oturumda kayıtlı değil.`); }
+                if (amountSilver === null) { return interaction.editReply({ content: "Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.", flags: [MessageFlags.Ephemeral] }); }
+                if (!session.players[player.id]) { return interaction.editReply({ content: `Hata: ${player.username} mevcut oturumda kayıtlı değil.`, flags: [MessageFlags.Ephemeral] }); }
                 session.players[player.id].cash += amountSilver;
                 saveSessions();
-                await interaction.editReply(`✅ Nakit eklendi! <@${player.id}> adlı oyuncunun hanesine **+${amountSilver.toLocaleString('tr-TR')}** Silver yazıldı.`);
+                await interaction.editReply(`✅ Nakit eklendi! <@${player.id}> adlı oyuncu **+${amountSilver.toLocaleString('tr-TR')}** Silver topladı.`);
                 break;
 
             case "item-ekle":
-                await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+                await interaction.deferReply(); // Herkesin görmesi için ephemeral kaldırıldı.
                 const amountStringItem = options.getString("tutar");
                 const amountItem = parseSilver(amountStringItem);
-                if (amountItem === null) { return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan."); }
+                if (amountItem === null) { return interaction.editReply({ content: "Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.", flags: [MessageFlags.Ephemeral] }); }
                 session.totalItemValue += amountItem;
-                if (amountItem >= 0) { await interaction.editReply(`✅ Ganimet eklendi! Ortak kasaya **+${amountItem.toLocaleString('tr-TR')}** Silver değerinde item eklendi.`); }
-                else { await interaction.editReply(`✅ Düzeltme yapıldı! Ortak kasadan **${amountItem.toLocaleString('tr-TR')}** Silver değerinde item düşüldü.`); }
                 saveSessions();
+                if (amountItem >= 0) { 
+                    await interaction.editReply(`✅ <@${user.id}> tarafından ortak kasaya **+${amountItem.toLocaleString('tr-TR')}** Silver değerinde item eklendi.`); 
+                } else { 
+                    await interaction.editReply(`✅ <@${user.id}> tarafından ortak kasadan **${amountItem.toLocaleString('tr-TR')}** Silver değerinde item düşüldü (Düzeltme).`); 
+                }
                 break;
             
             case "toplam":
