@@ -16,9 +16,13 @@ const SESSIONS_FILE = './sessions.json';
 let activeSessions = new Map();
 
 function saveSessions() {
-    const dataToSave = JSON.stringify(Array.from(activeSessions.entries()));
-    fs.writeFileSync(SESSIONS_FILE, dataToSave, 'utf-8');
-    console.log('Oturumlar dosyaya kaydedildi.');
+    try {
+        const dataToSave = JSON.stringify(Array.from(activeSessions.entries()));
+        fs.writeFileSync(SESSIONS_FILE, dataToSave, 'utf-8');
+        // console.log('Oturumlar dosyaya kaydedildi.'); // Logları temiz tutmak için kapatıldı
+    } catch (error) {
+        console.error("Oturumlar kaydedilirken hata oluştu:", error);
+    }
 }
 
 function loadSessions() {
@@ -26,8 +30,10 @@ function loadSessions() {
         if (fs.existsSync(SESSIONS_FILE)) {
             const data = fs.readFileSync(SESSIONS_FILE, 'utf-8');
             const parsedData = JSON.parse(data);
-            activeSessions = new Map(parsedData);
-            console.log(`${activeSessions.size} aktif oturum dosyadan yüklendi.`);
+            if (parsedData.length > 0) {
+                activeSessions = new Map(parsedData);
+                console.log(`${activeSessions.size} aktif oturum dosyadan yüklendi.`);
+            }
         }
     } catch (error) {
         console.error("Oturumlar yüklenirken hata oluştu:", error);
@@ -35,7 +41,7 @@ function loadSessions() {
 }
 
 // ----- Discord Client -----
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 
 // ----- Helper Functions -----
 function parseSilver(silverString) {
@@ -44,7 +50,7 @@ function parseSilver(silverString) {
     const lastChar = cleanedString.slice(-1);
     
     if (lastChar !== 'k' && lastChar !== 'm') {
-        return null; // Sadece k ve m formatlarını kabul et
+        return null; 
     }
 
     let numericPart = cleanedString.slice(0, -1);
@@ -94,16 +100,18 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.BOT_TOKEN);
 
+// ----- Bot Hazır Olduğunda Çalışacak Kod -----
 client.once("ready", async () => {
     console.log(`Bot hazır ✅ ${client.user.tag}`);
-    loadSessions(); // Bot başladığında yarım kalan oturumları yükle
+    loadSessions();
     try {
-        console.log("Slash komutlar güncelleniyor...");
+        console.log("Slash komutlar GLOBAL olarak güncelleniyor...");
+        // DEĞİŞİKLİK BURADA: Komutları sunucuya özel (guild) değil, global olarak kaydediyoruz.
         await rest.put(
-            Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+            Routes.applicationCommands(process.env.CLIENT_ID),
             { body: commands }
         );
-        console.log("Slash komutlar güncellendi ✅");
+        console.log("Slash komutlar GLOBAL olarak güncellendi ✅");
     } catch (err) {
         console.error("Slash komutları güncellenirken hata:", err);
     }
@@ -111,12 +119,19 @@ client.once("ready", async () => {
 
 // ----- Slash Command Handler -----
 client.on("interactionCreate", async interaction => {
+    // ... (Bu kısım bir önceki kodla aynı, o yüzden tekrar eklemiyorum. 
+    // Kendi dosyanızdaki client.on("interactionCreate",...) bloğunu burada tutabilirsiniz.)
+    // Eğer tam halini isterseniz, onu da ekleyebilirim.
+});
+
+
+// ----- BU KISMI KENDİ KODUNUZDAKİ İLE DEĞİŞTİRİN -----
+client.on("interactionCreate", async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName, options, channelId, user, member } = interaction;
     const yöneticiRolü = "Subay"; // BU ROL ADINI KENDİ SUNUCUNUZA GÖRE DEĞİŞTİRİN
 
-    // --- OTURUM BAŞLATMA ---
     if (commandName === "contentbaslat") {
         if (!member.roles.cache.some(role => role.name === yöneticiRolü)) {
             return interaction.reply({ content: "Bu komutu kullanmak için yetkin yok.", ephemeral: true });
@@ -139,12 +154,15 @@ client.on("interactionCreate", async interaction => {
         };
 
         const playerList = [];
-        for (const mention of playerMentions) {
+        const playerPromises = playerMentions.map(mention => {
             const id = mention.replace(/<@!?/, '').replace('>', '');
-            const member = await interaction.guild.members.fetch(id);
-            session.players.set(id, { user: member.user, cash: 0 });
-            playerList.push(`<@${id}>`);
-        }
+            return interaction.guild.members.fetch(id).then(member => {
+                session.players.set(id, { user: { id: member.user.id, username: member.user.username }, cash: 0 });
+                playerList.push(`<@${id}>`);
+            }).catch(() => console.log(`Üye bulunamadı: ${id}`));
+        });
+        
+        await Promise.all(playerPromises);
 
         activeSessions.set(channelId, session);
         saveSessions();
@@ -159,156 +177,147 @@ client.on("interactionCreate", async interaction => {
             .setFooter({ text: "`/item-ekle` ve `/silver-ekle` komutlarıyla ganimetleri ekleyebilirsiniz." });
 
         await interaction.editReply({ embeds: [embed] });
+        return;
     }
 
-    // --- LOOT EKLEME (GENEL KONTROL) ---
     const session = activeSessions.get(channelId);
     if (["silver-ekle", "item-ekle", "toplam", "loot-split", "contentbitir"].includes(commandName) && !session) {
         return interaction.reply({ content: "Bu kanalda aktif bir ganimet oturumu yok! Lütfen önce `/contentbaslat` komutunu kullanın.", ephemeral: true });
     }
-
-    // --- SILVER EKLEME ---
-    if (commandName === "silver-ekle") {
-        await interaction.deferReply({ ephemeral: true });
-
-        const player = options.getUser("oyuncu");
-        const amountString = options.getString("miktar");
-        const amount = parseSilver(amountString);
-
-        if (amount === null) {
-            return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.");
-        }
-        if (!session.players.has(player.id)) {
-            return interaction.editReply(`Hata: ${player.username} mevcut oturumda kayıtlı değil.`);
-        }
-
-        const playerData = session.players.get(player.id);
-        playerData.cash += amount;
-        saveSessions();
-
-        await interaction.editReply(`✅ Nakit eklendi! <@${player.id}> adlı oyuncunun hanesine **+${amount.toLocaleString('tr-TR')}** Silver yazıldı.`);
-    }
-
-    // --- ITEM EKLEME ---
-    if (commandName === "item-ekle") {
-        await interaction.deferReply({ ephemeral: true });
-        
-        const amountString = options.getString("tutar");
-        const amount = parseSilver(amountString);
-        
-        if (amount === null) {
-            return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.");
-        }
-
-        session.totalItemValue += amount;
-        if (amount > 0) {
-            await interaction.editReply(`✅ Ganimet eklendi! Ortak kasaya **+${amount.toLocaleString('tr-TR')}** Silver değerinde item eklendi.`);
-        } else {
-            await interaction.editReply(`✅ Düzeltme yapıldı! Ortak kasadan **${amount.toLocaleString('tr-TR')}** Silver değerinde item düşüldü.`);
-        }
-        saveSessions();
-    }
     
-    // --- TOPLAM (ANLIK DURUM) ---
-    if (commandName === "toplam") {
-        await interaction.deferReply();
+    // Diğer komutlar için deferReply'i kendi blokları içinde yapalım
+    switch (commandName) {
+        case "silver-ekle":
+            await interaction.deferReply({ ephemeral: true });
+            const player = options.getUser("oyuncu");
+            const amountStringSilver = options.getString("miktar");
+            const amountSilver = parseSilver(amountStringSilver);
 
-        let totalCash = 0;
-        let cashBreakdown = "";
-        for (const [id, data] of session.players.entries()) {
-            totalCash += data.cash;
-            cashBreakdown += `<@${id}>: **${data.cash.toLocaleString('tr-TR')}**\n`;
-        }
-
-        const embed = new EmbedBuilder()
-            .setColor("#3498DB")
-            .setTitle("📊 Anlık Ganimet Durumu")
-            .setDescription(`Oturumdaki mevcut birikim ve dağılım:`)
-            .addFields(
-                { name: "📦 Toplam İtem Değeri", value: `**${session.totalItemValue.toLocaleString('tr-TR')}** Silver` },
-                { name: "💵 Toplam Nakit Değeri", value: `**${totalCash.toLocaleString('tr-TR')}** Silver` },
-                { name: "🧑‍🤝‍🧑 Oyuncuların Topladığı Nakitler", value: cashBreakdown || "Henüz nakit toplanmadı." }
-            );
-
-        await interaction.editReply({ embeds: [embed] });
-    }
-
-    // --- OTURUMU BİTİR (İPTAL) ---
-    if (commandName === "contentbitir") {
-        if (!member.roles.cache.some(role => role.name === yöneticiRolü)) {
-            return interaction.reply({ content: "Bu komutu kullanmak için yetkin yok.", ephemeral: true });
-        }
-        activeSessions.delete(channelId);
-        saveSessions();
-        await interaction.reply("Bu kanaldaki mevcut ganimet oturumu iptal edildi.");
-    }
-
-    // --- LOOT SPLIT (NİHAİ RAPOR) ---
-    if (commandName === "loot-split") {
-        if (!member.roles.cache.some(role => role.name === yöneticiRolü)) {
-            return interaction.reply({ content: "Bu komutu kullanmak için yetkin yok.", ephemeral: true });
-        }
-        await interaction.deferReply();
-
-        const playerCount = session.players.size;
-        if (playerCount === 0) return interaction.editReply("Oturumda hiç oyuncu yok!");
-
-        // Item Hesaplaması
-        const itemTaxAmount = session.totalItemValue * (session.tax / 100);
-        const distributableItemValue = session.totalItemValue - itemTaxAmount;
-        const itemSharePerPlayer = distributableItemValue / playerCount;
-
-        // Nakit Hesaplaması
-        let totalCash = 0;
-        session.players.forEach(p => totalCash += p.cash);
-        const cashTaxAmount = totalCash * (session.tax / 100);
-        const distributableCash = totalCash - cashTaxAmount;
-        const cashSharePerPlayer = distributableCash / playerCount;
-        
-        // Ödeme Planı
-        const leaderId = user.id;
-        let paymentPlan = "";
-        session.players.forEach((data, id) => {
-            const balance = cashSharePerPlayer - data.cash;
-            if (id === leaderId) return; // Liderin kendiyle olan işlemini atla
-
-            if (balance < 0) { // Oyuncu borçlu
-                paymentPlan += `• <@${id}> ➡️ <@${leaderId}>: **${Math.abs(balance).toLocaleString('tr-TR')}** Silver ödeyecek.\n`;
-            } else if (balance > 0) { // Oyuncu alacaklı
-                paymentPlan += `• <@${leaderId}> ➡️ <@${id}>: **${balance.toLocaleString('tr-TR')}** Silver ödeyecek.\n`;
+            if (amountSilver === null) {
+                return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.");
             }
-        });
-
-        const leaderData = session.players.get(leaderId);
-        if (leaderData) {
-            const leaderBalance = cashSharePerPlayer - leaderData.cash;
-            if (leaderBalance < 0) {
-                paymentPlan += `• Lider (<@${leaderId}>) payından fazla topladığı **${Math.abs(leaderBalance).toLocaleString('tr-TR')}** Silver'ı dağıtımda kullanacak.\n`;
-            } else if (leaderBalance > 0) {
-                paymentPlan += `• Lider (<@${leaderId}>) kendi payı olan **${leaderBalance.toLocaleString('tr-TR')}** Silver'ı alacak.\n`;
+            if (!session.players.has(player.id)) {
+                return interaction.editReply(`Hata: ${player.username} mevcut oturumda kayıtlı değil.`);
             }
-        }
-        if (paymentPlan === "") paymentPlan = "Tüm oyuncular kendi payını toplamış, denkleştirmeye gerek yok.";
 
-        const embed = new EmbedBuilder()
-            .setColor("#F1C40F")
-            .setTitle("🏆 Ganimet Paylaşım Raporu!")
-            .setAuthor({ name: `Paylaşımı Yapan Lider: ${user.username}`, iconURL: user.displayAvatarURL() })
-            .addFields(
-                { name: "Genel Özet", value: `Toplam İtem: **${session.totalItemValue.toLocaleString('tr-TR')}**\nToplam Nakit: **${totalCash.toLocaleString('tr-TR')}**\nVergi: **%${session.tax}**` },
-                { name: "📦 ITEM PAYLAŞIMI", value: `Kişi Başı Düşen İtem Değeri: **${Math.round(itemSharePerPlayer).toLocaleString('tr-TR')}** Silver`},
-                { name: "💵 NAKİT DENKLEŞTİRME", value: `Kişi Başı Düşen Nakit Payı: **${Math.round(cashSharePerPlayer).toLocaleString('tr-TR')}** Silver` },
-                { name: "💸 ÖDEME PLANI", value: paymentPlan }
-            )
-            .setFooter({ text: "Oturum Sona Erdi" })
-            .setTimestamp();
+            const playerData = session.players.get(player.id);
+            playerData.cash += amountSilver;
+            saveSessions();
+            await interaction.editReply(`✅ Nakit eklendi! <@${player.id}> adlı oyuncunun hanesine **+${amountSilver.toLocaleString('tr-TR')}** Silver yazıldı.`);
+            break;
 
-        await interaction.editReply({ embeds: [embed] });
+        case "item-ekle":
+            await interaction.deferReply({ ephemeral: true });
+            const amountStringItem = options.getString("tutar");
+            const amountItem = parseSilver(amountStringItem);
+            
+            if (amountItem === null) {
+                return interaction.editReply("Geçersiz silver miktarı girdin! Lütfen `50k`, `1.25m` gibi bir format kullan.");
+            }
+
+            session.totalItemValue += amountItem;
+            if (amountItem >= 0) {
+                await interaction.editReply(`✅ Ganimet eklendi! Ortak kasaya **+${amountItem.toLocaleString('tr-TR')}** Silver değerinde item eklendi.`);
+            } else {
+                await interaction.editReply(`✅ Düzeltme yapıldı! Ortak kasadan **${amountItem.toLocaleString('tr-TR')}** Silver değerinde item düşüldü.`);
+            }
+            saveSessions();
+            break;
         
-        // Oturumu temizle
-        activeSessions.delete(channelId);
-        saveSessions();
+        case "toplam":
+            await interaction.deferReply();
+            let totalCash = 0;
+            let cashBreakdown = "";
+            for (const [id, data] of session.players.entries()) {
+                totalCash += data.cash;
+                cashBreakdown += `<@${id}>: **${data.cash.toLocaleString('tr-TR')}**\n`;
+            }
+            const embedToplam = new EmbedBuilder()
+                .setColor("#3498DB")
+                .setTitle("📊 Anlık Ganimet Durumu")
+                .setDescription(`Oturumdaki mevcut birikim ve dağılım:`)
+                .addFields(
+                    { name: "📦 Toplam İtem Değeri", value: `**${session.totalItemValue.toLocaleString('tr-TR')}** Silver` },
+                    { name: "💵 Toplam Nakit Değeri", value: `**${totalCash.toLocaleString('tr-TR')}** Silver` },
+                    { name: "🧑‍🤝‍🧑 Oyuncuların Topladığı Nakitler", value: cashBreakdown || "Henüz nakit toplanmadı." }
+                );
+            await interaction.editReply({ embeds: [embedToplam] });
+            break;
+
+        case "contentbitir":
+            if (!member.roles.cache.some(role => role.name === yöneticiRolü)) {
+                return interaction.reply({ content: "Bu komutu kullanmak için yetkin yok.", ephemeral: true });
+            }
+            activeSessions.delete(channelId);
+            saveSessions();
+            await interaction.reply("Bu kanaldaki mevcut ganimet oturumu iptal edildi.");
+            break;
+
+        case "loot-split":
+            if (!member.roles.cache.some(role => role.name === yöneticiRolü)) {
+                return interaction.reply({ content: "Bu komutu kullanmak için yetkin yok.", ephemeral: true });
+            }
+            await interaction.deferReply();
+            const playerCount = session.players.size;
+            if (playerCount === 0) return interaction.editReply("Oturumda hiç oyuncu yok!");
+
+            // Hesaplamalar...
+            const itemTaxAmount = session.totalItemValue * (session.tax / 100);
+            const distributableItemValue = session.totalItemValue - itemTaxAmount;
+            const itemSharePerPlayer = distributableItemValue / playerCount;
+            let totalCashSplit = 0;
+            session.players.forEach(p => totalCashSplit += p.cash);
+            const cashTaxAmount = totalCashSplit * (session.tax / 100);
+            const distributableCash = totalCashSplit - cashTaxAmount;
+            const cashSharePerPlayer = distributableCash / playerCount;
+            
+            const leaderId = user.id;
+            let paymentPlan = "";
+            let leaderOwes = 0;
+            let leaderReceives = 0;
+
+            session.players.forEach((data, id) => {
+                const balance = cashSharePerPlayer - data.cash;
+                if (id === leaderId) {
+                    if (balance < 0) leaderOwes = Math.abs(balance);
+                    else leaderReceives = balance;
+                    return;
+                }
+                if (balance < 0) {
+                    paymentPlan += `• <@${id}> ➡️ <@${leaderId}>: **${Math.abs(balance).toLocaleString('tr-TR')}** Silver ödeyecek.\n`;
+                } else if (balance > 0) {
+                    paymentPlan += `• <@${leaderId}> ➡️ <@${id}>: **${balance.toLocaleString('tr-TR')}** Silver ödeyecek.\n`;
+                }
+            });
+
+            if (leaderReceives > 0) {
+                 paymentPlan += `• Lider (<@${leaderId}>) kendi payı olan **${leaderReceives.toLocaleString('tr-TR')}** Silver'ı alacak.\n`;
+            } else if (leaderOwes > 0) {
+                 paymentPlan += `• Lider (<@${leaderId}>) payından fazla topladığı **${leaderOwes.toLocaleString('tr-TR')}** Silver'ı dağıtımda kullanacak.\n`;
+            }
+
+            if (paymentPlan === "") paymentPlan = "Tüm oyuncular kendi payını toplamış, denkleştirmeye gerek yok.";
+
+            const embedSplit = new EmbedBuilder()
+                .setColor("#F1C40F")
+                .setTitle("🏆 Ganimet Paylaşım Raporu!")
+                .setAuthor({ name: `Paylaşımı Yapan Lider: ${user.username}`, iconURL: user.displayAvatarURL() })
+                .addFields(
+                    { name: "Genel Özet", value: `Toplam İtem: **${session.totalItemValue.toLocaleString('tr-TR')}**\nToplam Nakit: **${totalCashSplit.toLocaleString('tr-TR')}**\nVergi: **%${session.tax}**` },
+                    { name: "📦 ITEM PAYLAŞIMI", value: `Kişi Başı Düşen İtem Değeri: **${Math.round(itemSharePerPlayer).toLocaleString('tr-TR')}** Silver`},
+                    { name: "💵 NAKİT DENKLEŞTİRME", value: `Kişi Başı Düşen Nakit Payı: **${Math.round(cashSharePerPlayer).toLocaleString('tr-TR')}** Silver` },
+                    { name: "💸 ÖDEME PLANI", value: paymentPlan }
+                )
+                .setFooter({ text: "Oturum Sona Erdi" })
+                .setTimestamp();
+            await interaction.editReply({ embeds: [embedSplit] });
+            
+            activeSessions.delete(channelId);
+            saveSessions();
+            break;
     }
 });
+// ----- BU SATIRIN ÜSTÜNDEKİ KODU KULLANIN -----
+
 
 client.login(process.env.BOT_TOKEN);
